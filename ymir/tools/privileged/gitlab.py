@@ -682,7 +682,7 @@ class GetFailedPipelineJobsFromMergeRequestTool(
                         ),
                     )
                     for job in jobs
-                    if job.status == "failed"
+                    if job.status == "failed" or job.status == "waived"
                 ]
 
             failed_jobs = await asyncio.to_thread(get_latest_pipeline_jobs)

@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 from ymir.tools.base import CloneableTool as Tool
 from ymir.tools.constants import AIOHTTP_TIMEOUT
 
+TESTING_FARM_ARTIFACTS_URL = "https://artifacts.osci.redhat.com/testing-farm"
+
 logger = logging.getLogger(__name__)
 
 GREENWAVE_URL = "https://gating-status.osci.redhat.com"
@@ -69,3 +71,69 @@ class FetchGreenWaveTool(Tool[FetchGreenWaveInput, ToolRunOptions, StringToolOut
         except Exception as e:
             logger.error("Error fetching GreenWave gating status: %s", e)
             return StringToolOutput(result=f"Error fetching GreenWave gating status: {e}")
+
+
+class FetchTestingFarmResultsInput(BaseModel):
+    artifact_url: str = Field(
+        description=(
+            "Base artifact URL for a Testing Farm run, e.g. "
+            "http://artifacts.osci.redhat.com/testing-farm/<uuid>. "
+            "Can also be a full URL to a specific file such as results-junit.xml."
+        )
+    )
+
+
+class FetchTestingFarmResultsTool(Tool[FetchTestingFarmResultsInput, ToolRunOptions, StringToolOutput]):
+    """
+    Fetches test results from a Testing Farm artifact URL.
+    Retrieves results-junit.xml to show which individual tests passed, failed, or errored.
+    """
+
+    name = "fetch_testing_farm_results"  # type: ignore
+    description = (  # type: ignore
+        "Fetch individual test results from a Testing Farm artifact URL. "
+        "Given a base artifact URL (e.g. from a GreenWave NEEDS_INSPECTION/FAILED/WAIVED result "
+        "or from a GitLab MR pipeline job), retrieves the results-junit.xml file which lists "
+        "each individual test case and its outcome (passed, failed, error). "
+        "Use this to find out which specific tests failed inside a tier* job."
+    )
+    input_schema = FetchTestingFarmResultsInput  # type: ignore
+
+    def _create_emitter(self) -> Emitter:
+        return Emitter.root().child(
+            namespace=["tool", "testing_farm", self.name],
+            creator=self,
+        )
+
+    async def _run(
+        self,
+        input: FetchTestingFarmResultsInput,
+        options: ToolRunOptions | None,
+        context: RunContext,
+    ) -> StringToolOutput:
+        base_url = input.artifact_url.rstrip("/")
+
+        # If a full path to a specific file was given, fetch it directly
+        if base_url.endswith(".xml") or base_url.endswith(".yaml") or base_url.endswith(".html"):
+            urls_to_try = [base_url]
+        else:
+            urls_to_try = [
+                f"{base_url}/results-junit.xml",
+                f"{base_url}/results.xml",
+            ]
+
+        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+            for url in urls_to_try:
+                logger.info("Fetching Testing Farm results from %s", url)
+                try:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            return StringToolOutput(result=content)
+                        logger.warning("Got HTTP %d for %s", response.status, url)
+                except Exception as e:
+                    logger.warning("Error fetching %s: %s", url, e)
+
+        return StringToolOutput(
+            result=f"Could not fetch test results from {input.artifact_url} — tried {urls_to_try}"
+        )
